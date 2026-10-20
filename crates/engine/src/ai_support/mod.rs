@@ -758,16 +758,23 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let exact = if lower_bounded { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (lower_bounded && chosen.len() > *count)
         }
+        // CR 608.2d: an "up to N" zone choice accepts any selection of at most
+        // N cards (Atraxa, Grand Unifier's per-card-type pick), mirroring the
+        // `ChooseFromZoneChoice` reducer's count check.
         (
             WaitingFor::ChooseFromZoneChoice {
                 player: _,
                 cards,
                 count,
+                up_to,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => {
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || chosen.len() > *count
+        }
+        (
             WaitingFor::ConniveDiscard {
                 player: _,
                 cards,

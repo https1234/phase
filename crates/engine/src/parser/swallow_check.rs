@@ -676,6 +676,12 @@ fn detect_replacement_instead(
     if any_ability_has_instead_condition(parsed) {
         return;
     }
+    // CR 614.1a + CR 605.1a: colorless "add {C}. If X, add {C}{C} instead" mana
+    // abilities are lowered to a conditional colorless delta (see
+    // `def_tree_has_mana_instead_delta`), which carries the clause.
+    if parsed.abilities.iter().any(def_tree_has_mana_instead_delta) {
+        return;
+    }
     // CR 608.2m + CR 614.1a + CR 614.11: the remaining replacement carriers live
     // in an effect or a static rather than in `parsed.replacements`.
     if any_ability_has_replacement_carrier(parsed) {
@@ -1788,6 +1794,29 @@ fn def_tree_has_instead_condition(def: &AbilityDefinition) -> bool {
     def.mode_abilities
         .iter()
         .any(def_tree_has_instead_condition)
+}
+
+/// CR 614.1a + CR 605.1a: `normalize_activated_mana_instead_delta` lowers a
+/// colorless mana ability's "If X, add {C}{C} instead" from a `ConditionInstead`
+/// sub-ability to an additive sub-ability that produces only the difference
+/// under the bare condition — the same mana, without the `*Instead` wrapper
+/// `any_ability_has_instead_condition` looks for. A colorless mana production
+/// chained to a conditional colorless mana production is that lowering, and so
+/// is the parsed form of the "instead" clause.
+fn def_tree_has_mana_instead_delta(def: &AbilityDefinition) -> bool {
+    fn produces_colorless(def: &AbilityDefinition) -> bool {
+        matches!(
+            def.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless { .. },
+                ..
+            }
+        )
+    }
+    let sub = def.sub_ability.as_deref();
+    (produces_colorless(def)
+        && sub.is_some_and(|sub| produces_colorless(sub) && sub.condition.is_some()))
+        || sub.is_some_and(def_tree_has_mana_instead_delta)
 }
 
 fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
@@ -4040,6 +4069,32 @@ fn exile_resolving_rider_if_you_do_is_only_if_marker(stripped: &str) -> bool {
 /// clause is located and dropped via the shared `is_moved_object_enters_modifier_clause`
 /// combinator, and suppression fires ONLY when no OTHER bare " if " remains — so
 /// a compound card carrying the gate AND a separate dropped " if " still flags.
+/// CR 611.3a + CR 105.2a: "Each creature you control has vigilance if it's
+/// white, hexproof if it's blue, …" (Scion of Draco) — each "if it's <color>"
+/// qualifies WHICH objects the continuous effect applies to, not WHETHER it
+/// applies, and the parser folds it into the static's `affected` filter as a
+/// `FilterProp::HasColor` property. Text-scoped: only when a color property is
+/// present and every bare " if " in the unit is such a color qualifier.
+fn color_qualifier_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    if !evidence.any_at::<FilterProp>(&["properties"], |prop| {
+        matches!(prop, FilterProp::HasColor { .. })
+    }) {
+        return false;
+    }
+    let residual = ["white", "blue", "black", "red", "green"].iter().fold(
+        stripped.to_string(),
+        |text, color| {
+            // allow-noncombinator: swallow detector marker scan on classified text
+            text.replace(&format!(" if it's {color}"), "")
+                .replace(&format!(" if it is {color}"), "")
+        },
+    );
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 fn enters_modified_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
     if !evidence.has_slot("enters_modified_if") {
         return false;
@@ -4750,6 +4805,11 @@ fn detect_condition_if(
     // `enters_modified_if` gate on the absorbed ChangeZone. Text-scoped: only
     // suppresses when that enters-modifier clause is the card's only bare " if ".
     if enters_modified_if_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
+    // CR 611.3a: per-color "if it's <color>" grant qualifiers live in the
+    // static's `affected` filter (Scion of Draco).
+    if color_qualifier_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
     // CR 122.1 + CR 614.1c + CR 608.2c: an affirmative `if `-voiced reflexive
@@ -8460,6 +8520,67 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// CR 614.1a + CR 605.1a: a colorless "add {C}. If X, add {C}{C} instead"
+    /// mana ability is lowered to a conditional colorless delta; that delta is
+    /// the parsed "instead" clause, whatever the condition is.
+    #[test]
+    fn replacement_instead_accepts_colorless_mana_instead_delta() {
+        for (text, name) in [
+            (
+                "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n\
+                 {T}: Add {C}. If a card is exiled with this land, add {C}{C} instead.\n\
+                 {T}: Return the exiled card to its owner's hand.",
+                "Ugin's Labyrinth",
+            ),
+            (
+                "{T}: Add {C}. If you have the initiative, add {C}{C} instead.",
+                "Colorless Initiative Rock",
+            ),
+        ] {
+            let parsed = parse_named(text, name, &["Land"]);
+            assert!(
+                !has_swallowed_detector(&parsed, "Replacement_Instead"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 611.3a: per-color grant qualifiers ("has vigilance if it's white")
+    /// are folded into each static's `affected` filter; a real game-state
+    /// condition in the same sentence must still warn.
+    #[test]
+    fn condition_if_accepts_per_color_grant_qualifiers() {
+        let scion = parse_named(
+            "Flying\nEach creature you control has vigilance if it's white, hexproof if it's blue, \
+             lifelink if it's black, first strike if it's red, and trample if it's green.",
+            "Scion of Draco",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&scion, "Condition_If"),
+            "{:?}",
+            scion.parse_warnings
+        );
+
+        let gated = parse_named(
+            "Each creature you control has vigilance if it's white if you control a Plains.",
+            "Gated Color Grant",
+            &["Creature"],
+        );
+        let explicitly_unsupported = gated
+            .abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::Unimplemented { .. }));
+        assert!(
+            has_swallowed_detector(&gated, "Condition_If")
+                || explicitly_unsupported
+                || gated.statics.iter().any(|s| s.condition.is_some()),
+            "a game-state condition must be represented, unsupported or warned: {:?}",
+            gated.parse_warnings
+        );
     }
 
     #[test]

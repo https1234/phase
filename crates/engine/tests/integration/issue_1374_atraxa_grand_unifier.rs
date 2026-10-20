@@ -298,3 +298,43 @@ fn atraxa_etb_decline_choose_zero_cards_is_accepted() {
         "the answered prompt must not remain pending"
     );
 }
+
+/// CR 608.2d: the legal-action snapshot must agree with the reducer on an
+/// `up_to` zone choice. The reducer accepts any constraint-satisfying selection
+/// of at most `count` cards, so the snapshot must offer short selections too —
+/// with ten revealed cards of only two card types, no selection reaches the
+/// eight-card maximum, and an exact-count filter would leave no legal action.
+#[test]
+fn atraxa_etb_legal_actions_offer_short_up_to_selections() {
+    let (state, library_top, _padding, _graveyard_trap) = atraxa_choice_fixture();
+    let selections: Vec<Vec<ObjectId>> = engine::ai_support::legal_actions(&state)
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::SelectCards { cards } => Some(cards),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        selections.iter().any(Vec::is_empty),
+        "declining (zero cards) must be a legal action, got {selections:?}"
+    );
+    let (creature, instant) = (library_top[0], library_top[1]);
+    assert!(
+        selections
+            .iter()
+            .any(|s| s.len() == 2 && s.contains(&creature) && s.contains(&instant)),
+        "one creature plus one instant must be a legal selection, got {selections:?}"
+    );
+    for selection in &selections {
+        let mut probe = state.clone();
+        engine::game::engine::apply(
+            &mut probe,
+            P0,
+            GameAction::SelectCards {
+                cards: selection.clone(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("offered selection {selection:?} must apply: {e:?}"));
+    }
+}
