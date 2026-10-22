@@ -1739,6 +1739,15 @@ fn abandon_source_bound_resolution_prompt(
         )
         .expect("parked optional sacrifice payment must own its resume cursor");
     }
+    // CR 800.4a + CR 614.12: a prompt raised by a replacement continuation
+    // (an as-enters choice asked once the entry's optional cost applied, e.g.
+    // Multiversal Passage's land type after its 2 life were paid) is owned by
+    // that continuation, not by a resolving ability. It leaves with the
+    // prompt, so the carrier abandonment below finds the resolution's own
+    // continuation (if any) on top instead of the replacement's.
+    if state.active_post_replacement_drains().is_some() {
+        super::replacement::abandon_post_replacement_continuation(state);
+    }
 
     finish_abandoned_source_bound_resolution_carrier(state, leaving_set, events);
     state.waiting_for = WaitingFor::Priority {

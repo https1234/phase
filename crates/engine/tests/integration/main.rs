@@ -25,6 +25,7 @@ mod additional_phase_recipient_kinds;
 mod advanced_reconstruction_regression;
 mod affinity_plural_subtype;
 mod agent_frank_horrigan_attacked_this_turn_indestructible;
+mod ai_dead_end_casts;
 mod ai_decision_contract;
 mod ai_multi_target_selection;
 mod ajani_nacatl_pariah_co_departure_6427;

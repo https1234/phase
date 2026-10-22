@@ -1119,6 +1119,45 @@ pub(crate) fn modal_chooser_candidates(
         .collect()
 }
 
+/// CR 601.2b + CR 601.2c + CR 107.3: Whether announcing `x` leaves every
+/// target `ability` then requires with a legal choice. The single authority
+/// for "does this X work": the X announcement itself (`GameAction::ChooseX`),
+/// the AI's X candidates, castability and mode availability all ask it, so
+/// none of them offers an X (or a spell, or a mode) the announcement rejects.
+pub fn ability_targets_legal_with_x(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+    target_constraints: &[TargetSelectionConstraint],
+    x: u32,
+) -> bool {
+    let mut trial = ability.clone();
+    trial.set_chosen_x_recursive(x);
+    let Ok(mut target_slots) = build_target_slots(state, &trial) else {
+        return false;
+    };
+    // CR 601.2c + CR 601.2d: a divided spell's slots are clamped to the
+    // now-known pool, as the controller will be offered them (issue #2856).
+    cap_distribution_target_slots(state, &trial, distribute, &mut target_slots);
+    target_slots.is_empty()
+        || has_legal_target_assignment_for_ability(state, &trial, &target_slots, target_constraints)
+}
+
+/// CR 601.2b + CR 601.2c: Whether some X in `min..=max` — the values the X
+/// announcement would accept — gives `ability` a legal target assignment
+/// (see [`ability_targets_legal_with_x`]).
+pub fn some_x_targets_legal(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+    target_constraints: &[TargetSelectionConstraint],
+    min: u32,
+    max: u32,
+) -> bool {
+    (min..=max)
+        .any(|x| ability_targets_legal_with_x(state, ability, distribute, target_constraints, x))
+}
+
 /// CR 700.2a-b: Mode indices a modal spell cannot choose — repeat constraints
 /// plus modes whose targeting requirements have no legal assignment.
 pub fn spell_modal_unavailable_modes(
@@ -1139,10 +1178,41 @@ pub fn spell_modal_unavailable_modes(
             let resolved = build_resolved_from_def(mode, source_id, controller);
             ability_target_legality_needs_chosen_x(&resolved, mode.distribute.as_ref())
         });
-    // CR 601.2b/c: When modal spell target legality depends on announced X,
-    // modes cannot be pre-disabled before ChooseXValue — same deferral as
-    // activated modal abilities (casting.rs AbilityModeChoice path).
-    if !x_dependent_modal_targets {
+    if x_dependent_modal_targets {
+        // CR 700.2a + CR 601.2b-c: X is announced after the modes, so a mode
+        // whose targets depend on X can be chosen when some X the caster could
+        // announce — up to the X announcement's own cap — gives it a legal
+        // target; a mode no announceable X serves would only reach an X step
+        // that rejects every value. Modes that don't read X are judged as usual.
+        let x_max = super::casting_costs::announceable_x_max(state, controller, source_id);
+        let target_constraints = target_constraints_from_modal(modal);
+        for (mode_idx, def) in mode_abilities.iter().enumerate().take(modal.mode_count) {
+            if unavailable_modes.contains(&mode_idx) {
+                continue;
+            }
+            let resolved = build_resolved_from_def(def, source_id, controller);
+            let legal =
+                if ability_target_legality_needs_chosen_x(&resolved, def.distribute.as_ref()) {
+                    x_max.is_some_and(|max| {
+                        some_x_targets_legal(
+                            state,
+                            &resolved,
+                            def.distribute.as_ref(),
+                            &target_constraints,
+                            resolved.min_x_value,
+                            max,
+                        )
+                    })
+                } else {
+                    mode_has_legal_targets(state, &resolved, &target_constraints)
+                };
+            if !legal {
+                unavailable_modes.push(mode_idx);
+            }
+        }
+        unavailable_modes.sort_unstable();
+        unavailable_modes.dedup();
+    } else {
         filter_modes_by_target_legality(
             state,
             source_id,
@@ -1284,30 +1354,33 @@ pub fn filter_modes_by_target_legality(
             continue;
         };
         let resolved = build_resolved_from_def(def, source_id, controller);
-        let target_slots = match build_target_slots(state, &resolved) {
-            Ok(slots) => slots,
-            Err(_) => {
-                // build_target_slots returns Err when no legal targets exist
-                // for a required targeting slot — mark mode unavailable.
-                unavailable_modes.push(mode_idx);
-                continue;
-            }
-        };
-        // A mode with no target slots does not require targeting — always legal.
-        if target_slots.is_empty() {
-            continue;
-        }
-        if !has_legal_target_assignment_for_ability(
-            state,
-            &resolved,
-            &target_slots,
-            &target_constraints,
-        ) {
+        if !mode_has_legal_targets(state, &resolved, &target_constraints) {
             unavailable_modes.push(mode_idx);
         }
     }
     unavailable_modes.sort_unstable();
     unavailable_modes.dedup();
+}
+
+/// CR 700.2a: Whether one mode's targeting requirements have a legal
+/// assignment on the current board (a mode with no targets always does).
+fn mode_has_legal_targets(
+    state: &GameState,
+    resolved: &ResolvedAbility,
+    target_constraints: &[TargetSelectionConstraint],
+) -> bool {
+    // build_target_slots returns Err when a required targeting slot has no
+    // legal target.
+    let Ok(target_slots) = build_target_slots(state, resolved) else {
+        return false;
+    };
+    target_slots.is_empty()
+        || has_legal_target_assignment_for_ability(
+            state,
+            resolved,
+            &target_slots,
+            target_constraints,
+        )
 }
 
 /// CR 700.2a-b + CR 115.1: Cap a modal choice by the largest mode set whose

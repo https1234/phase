@@ -7881,6 +7881,77 @@ pub(super) fn begin_optional_cost_before_targets(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2b + CR 107.3: The largest X the caster could announce for
+/// `object_id` if they cast it now — the X announcement's own cap: the mana
+/// they can pay for the spell's {X} and, for an X in a required additional
+/// cost, that cost's own limit (`pay_additional_cost_with_source` takes the smaller).
+/// `None` when the spell announces no X. Read from the printed cost, before
+/// any tax, so it never falls below the cap the announcement will apply.
+pub(crate) fn announceable_x_max(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<u32> {
+    let obj = state.objects.get(&object_id)?;
+    let mana_max = cost_has_x(&obj.mana_cost)
+        .then(|| max_x_value(state, player, &obj.mana_cost, Some(object_id)));
+    let additional_max = match obj.additional_cost.as_ref() {
+        Some(AdditionalCost::Required(cost)) => {
+            additional_cost_x_max(state, player, object_id, None, cost)
+        }
+        _ => None,
+    };
+    match (additional_max, mana_max) {
+        (Some(additional), Some(mana)) => Some(additional.min(mana)),
+        (additional, mana) => additional.or(mana),
+    }
+}
+
+/// CR 601.2b + CR 601.2c + CR 601.2f: Whether `pending` accepts `value` as its
+/// announced X: the activation cost stays payable, and a cast whose targets
+/// wait on X keeps a legal target assignment. The single authority for the
+/// `ChooseX` reducer and the AI's X candidates.
+pub(crate) fn validate_x_choice(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    value: u32,
+) -> Result<(), EngineError> {
+    let mut trial = pending.clone();
+    trial.ability.set_chosen_x_recursive(value);
+    if trial.activation_ability_index.is_some()
+        && trial.activation_cost.as_ref().is_some_and(|cost| {
+            !activation_cost_is_payable_after_x_choice(
+                state,
+                player,
+                trial.object_id,
+                cost,
+                &trial.ability,
+            )
+        })
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "X={value} cannot pay the activation cost"
+        )));
+    }
+    // CR 601.2c: A chosen X that determines targets must have a legal target
+    // assignment before it is locked into the pending cast.
+    if pending.deferred_target_selection
+        && !super::ability_utils::ability_targets_legal_with_x(
+            state,
+            &pending.ability,
+            pending.distribute.as_ref(),
+            &pending.target_constraints,
+            value,
+        )
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "X={value} has no legal target assignment"
+        )));
+    }
+    Ok(())
+}
+
 /// CR 601.2b: X in a variable additional cost is announced before later target choices.
 pub(super) fn required_additional_cost_can_declare_x(
     state: &GameState,
@@ -30390,7 +30461,10 @@ its replicate cost was paid.)\nDraw a card.";
 
         state.waiting_for = waiting;
         let candidates = candidate_actions(&state);
-        assert!(candidates.iter().any(|candidate| matches!(
+        // CR 601.2h: with only {W} available, exiling nothing leaves X=2 unpaid
+        // and the cast could only be reversed, so that selection isn't offered;
+        // each discounted selection is.
+        assert!(!candidates.iter().any(|candidate| matches!(
             &candidate.action,
             GameAction::SelectCards { cards } if cards.is_empty()
         )));

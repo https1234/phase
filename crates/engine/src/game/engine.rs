@@ -38,8 +38,8 @@ use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
-    compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
+    modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -13953,55 +13953,10 @@ fn apply_non_priority_pass_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
-                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
-                // metadata in SpellMeta and enforced during mana payment.
-                let mut trial = pending.as_ref().clone();
-                trial.ability.set_chosen_x_recursive(value);
-                trial.cost.concretize_x(value);
-                if trial.activation_ability_index.is_some()
-                    && trial.activation_cost.as_ref().is_some_and(|cost| {
-                        !casting_costs::activation_cost_is_payable_after_x_choice(
-                            state,
-                            player,
-                            trial.object_id,
-                            cost,
-                            &trial.ability,
-                        )
-                    })
-                {
-                    return Err(EngineError::InvalidAction(format!(
-                        "X={value} cannot pay the activation cost"
-                    )));
-                }
-                if pending.deferred_target_selection {
-                    // CR 601.2c: A chosen X that determines target count must
-                    // have a legal target assignment before it is locked into
-                    // the pending cast.
-                    // CR 601.2f: The same X value then determines the total cost.
-                    let mut target_slots = build_target_slots(state, &trial.ability)?;
-                    // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
-                    // (now-known) pool so the legal-assignment probe matches what
-                    // the controller will actually be offered (issue #2856).
-                    cap_distribution_target_slots(
-                        state,
-                        &trial.ability,
-                        trial.distribute.as_ref(),
-                        &mut target_slots,
-                    );
-                    if !target_slots.is_empty()
-                        && !has_legal_target_assignment_for_ability(
-                            state,
-                            &trial.ability,
-                            &target_slots,
-                            &trial.target_constraints,
-                        )
-                    {
-                        return Err(EngineError::InvalidAction(format!(
-                            "X={value} has no legal target assignment"
-                        )));
-                    }
-                }
+                // CR 601.2b + CR 601.2c + CR 601.2f: the activation cost must
+                // stay payable and X-dependent targets must keep a legal
+                // assignment (shared with the AI's X candidates).
+                casting_costs::validate_x_choice(state, player, pending, value)?;
             }
             let pending = state
                 .pending_cast

@@ -19902,9 +19902,22 @@ fn spell_has_legal_targets_in_flushed_state(
     if additional_cost_instead_spell_has_legal_targets(state, &ability_def, obj.id, player) {
         return true;
     }
+    // CR 601.2b-c + CR 107.3: when target legality depends on the announced
+    // X, the spell can be cast when some X the caster could announce — from
+    // the ability's minimum to the X announcement's cap — leaves a legal
+    // target assignment. With none, every X the announcement offers is
+    // rejected and the cast can only be reversed (CR 733).
     ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
-        && (casting_costs::required_additional_cost_can_declare_x(state, player, obj.id).is_some()
-            || casting_costs::cost_has_x(&obj.mana_cost))
+        && casting_costs::announceable_x_max(state, player, obj.id).is_some_and(|max| {
+            super::ability_utils::some_x_targets_legal(
+                state,
+                &resolved,
+                ability_def.distribute.as_ref(),
+                &ability_def.target_constraints,
+                resolved.min_x_value,
+                max,
+            )
+        })
 }
 
 /// The mode choice a modal spell's `ModeChoice` prompt presents, with what it
@@ -21893,7 +21906,7 @@ pub(crate) fn prepared_spell_payment_verdict_with_probe(
     })
 }
 
-pub(super) fn can_feasibly_pay_mana_cost_with_probe(
+pub(crate) fn can_feasibly_pay_mana_cost_with_probe(
     state: &GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,

@@ -2099,10 +2099,15 @@ pub fn candidate_actions_broad_with_probe(
                             &pending_cast.cost,
                             &spree_total,
                         );
-                        casting::can_pay_cost_after_auto_tap_with_probe(
+                        // CR 702.172a + CR 117.1d + CR 601.2g: the same
+                        // feasibility the spell's castability used (mana
+                        // abilities the caster can activate during payment
+                        // count), so a castable spree spell always offers a
+                        // mode selection.
+                        casting::can_feasibly_pay_mana_cost_with_probe(
                             local_probe.state(),
                             *player,
-                            pending_cast.object_id,
+                            Some(pending_cast.object_id),
                             &total,
                             Some(&local_probe),
                         )
@@ -2229,18 +2234,43 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
+        WaitingFor::OptionalCostChoice {
+            player,
+            cost,
+            pending_cast,
+            ..
+        } => {
+            // CR 601.2h: partial payments aren't allowed, so paying an optional
+            // mana cost (once more, for a repeatable one such as replicate)
+            // only leads anywhere when the total stays payable.
+            let payable = match cost {
+                crate::types::ability::AdditionalCost::Optional {
+                    cost: crate::types::ability::AbilityCost::Mana { cost: extra },
+                    ..
+                } => casting::can_feasibly_pay_mana_cost_with_probe(
+                    state,
+                    *player,
+                    Some(pending_cast.object_id),
+                    &crate::game::restrictions::add_mana_cost(&pending_cast.cost, extra),
+                    None,
+                ),
+                _ => true,
+            };
+            let mut actions = Vec::with_capacity(2);
+            if payable {
+                actions.push(candidate(
+                    GameAction::DecideOptionalCost { pay: true },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions.push(candidate(
                 GameAction::DecideOptionalCost { pay: false },
                 TacticalClass::Selection,
                 Some(*player),
-            ),
-        ],
+            ));
+            actions
+        }
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
@@ -2383,6 +2413,62 @@ pub fn candidate_actions_broad_with_probe(
             resume: CostResume::ManaAbility { .. },
             ..
         } => bounded_select_card_candidates(*player, choices, [*count]),
+        // CR 601.2h: a spell's costs are paid in full or not at all. Choosing
+        // the object a later part of the payment needs (the only Treasure that
+        // can make the {B} still owed) leaves the rest unpayable and reverses
+        // the cast (CR 733), so a selection is offered only when the cast
+        // survives it. Kept unfiltered if no selection does, so a dead cast is
+        // still answered rather than left without moves.
+        WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
+            choices,
+            count,
+            min_count,
+            resume: CostResume::SpellCost { spell, .. },
+            ..
+        } => {
+            let all = bounded_select_card_candidates(*player, choices, *min_count..=*count);
+            let spell_id = spell.object_id;
+            let survives: Vec<CandidateAction> = all
+                .iter()
+                .filter(|candidate| {
+                    let mut trial = state.clone();
+                    crate::game::engine::apply_as_current_for_simulation(
+                        &mut trial,
+                        candidate.action.clone(),
+                    )
+                    .is_ok()
+                        && match trial
+                            .waiting_for
+                            .pending_cast_ref()
+                            .or(trial.pending_cast.as_deref())
+                        {
+                            // Still paying: what is owed must stay payable
+                            // with the sources the selection left.
+                            Some(pending) if trial.waiting_for.has_pending_cast() => {
+                                casting::can_feasibly_pay_mana_cost_with_probe(
+                                    &trial,
+                                    *player,
+                                    Some(spell_id),
+                                    &pending.cost,
+                                    None,
+                                )
+                            }
+                            _ => trial
+                                .objects
+                                .get(&spell_id)
+                                .is_some_and(|object| object.zone == Zone::Stack),
+                        }
+                })
+                .cloned()
+                .collect();
+            if survives.is_empty() {
+                all
+            } else {
+                survives
+            }
+        }
         WaitingFor::PayCost {
             player,
             kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
@@ -3479,9 +3565,19 @@ pub fn candidate_actions_broad_with_probe(
                     .collect()
             }
         }
+        // CR 601.2b-c: only X values the announcement accepts (an X that
+        // leaves a required target without a legal choice is rejected).
         WaitingFor::ChooseXValue {
-            player, min, max, ..
+            player,
+            min,
+            max,
+            pending_cast,
+            ..
         } => (*min..=*max)
+            .filter(|&value| {
+                crate::game::casting_costs::validate_x_choice(state, *player, pending_cast, value)
+                    .is_ok()
+            })
             .map(|value| {
                 candidate(
                     GameAction::ChooseX { value },
