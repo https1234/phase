@@ -27523,7 +27523,10 @@ fn activate_with_cost_carrier(
                     kind: PayCostKind::ExileFromZone { zone: narrow_zone },
                     choices: eligible,
                     count: count as usize,
-                    min_count: 0,
+                    // CR 601.2h: the cost names an exact number of cards and the handler
+                    // (`handle_exile_for_cost`) accepts exactly that many, so the prompt's
+                    // lower bound is that number too, not 0.
+                    min_count: count as usize,
                     resume: CostResume::Spell {
                         spell: Box::new(pending_exile),
                     },

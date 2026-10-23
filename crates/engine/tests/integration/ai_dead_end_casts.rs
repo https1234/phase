@@ -11,6 +11,9 @@
 //! - CR 601.2h: costs are paid in full or not at all, so a sacrifice for an
 //!   additional cost is offered only when what is still owed stays payable
 //!   (Deadly Precision can't sacrifice the only Treasure that makes its {B}).
+//! - CR 601.2h: a cost that exiles an exact number of cards asks for exactly
+//!   that many (Psychic Frog's three); a prompt allowing fewer filled the AI's
+//!   capped candidate list with selections the payment rejects.
 //! - CR 800.4a + CR 614.12: a player who loses to the life paid for an
 //!   as-enters option (Multiversal Passage at 2 life) leaves cleanly; the game
 //!   ends instead of the engine panicking while abandoning the entry's
@@ -30,6 +33,10 @@
 //! - Deadly Precision ({B}, instant): "As an additional cost to cast this
 //!   spell, pay {4} or sacrifice an artifact or creature. Destroy target
 //!   creature."
+//! - Psychic Frog ({U}{B}, creature): "Whenever this creature deals combat
+//!   damage to a player or planeswalker, draw a card. Discard a card: Put a
+//!   +1/+1 counter on this creature. Exile three cards from your graveyard:
+//!   This creature gains flying until end of turn."
 //! - Multiversal Passage (land): "As this land enters, choose a basic land
 //!   type. Then you may pay 2 life. If you don't, it enters tapped. This land
 //!   is the chosen type."
@@ -264,5 +271,53 @@ fn sacrifice_cost_spares_the_only_source_of_the_mana_still_owed() {
     assert!(
         offered.iter().all(|cards| !cards.contains(&treasure)),
         "the Treasure is the only way to pay {{B}}, so it can't be the sacrifice: {offered:?}"
+    );
+}
+
+#[test]
+fn exact_count_exile_cost_offers_only_that_many_cards() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let frog = scenario.add_real_card(P0, "Psychic Frog", Zone::Battlefield, db);
+    // More cards than the AI's selection pool, as in the game that looped.
+    for _ in 0..14 {
+        scenario.add_real_card(P0, "Swamp", Zone::Graveyard, db);
+    }
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: frog,
+            ability_index: 1,
+        })
+        .expect("activate the exile-three ability");
+    let WaitingFor::PayCost {
+        count, min_count, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the exile cost prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (min_count, count),
+        (3, 3),
+        "the cost exiles exactly three cards"
+    );
+    let offered: Vec<Vec<ObjectId>> = legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::SelectCards { cards } => Some(cards),
+            _ => None,
+        })
+        .collect();
+    assert!(!offered.is_empty(), "some three-card selection is offered");
+    assert!(
+        offered.iter().all(|cards| cards.len() == 3),
+        "every offered selection pays the cost: {offered:?}"
     );
 }

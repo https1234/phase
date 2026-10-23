@@ -6412,7 +6412,10 @@ fn surface_next_interactive_activation_cost_leg(
             kind: PayCostKind::ExileFromZone { zone },
             choices: eligible,
             count: count as usize,
-            min_count: 0,
+            // CR 601.2h: the cost names an exact number of cards and the handler
+            // (`handle_exile_for_cost`) accepts exactly that many, so the prompt's
+            // lower bound is that number too, not 0.
+            min_count: count as usize,
             resume: CostResume::Spell {
                 spell: Box::new(pending.clone()),
             },
@@ -10437,7 +10440,10 @@ fn pay_additional_cost_with_source(
                 kind: PayCostKind::ExileFromZone { zone: narrow_zone },
                 choices: eligible,
                 count: count as usize,
-                min_count: 0,
+                // CR 601.2h: the cost names an exact number of cards and the handler
+                // (`handle_exile_for_cost`) accepts exactly that many, so the prompt's
+                // lower bound is that number too, not 0.
+                min_count: count as usize,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
